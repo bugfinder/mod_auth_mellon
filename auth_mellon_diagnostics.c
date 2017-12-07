@@ -16,6 +16,11 @@
 #define AM_DIAG_ENABLED(diag_cfg)                                       \
     (diag_cfg && diag_cfg->fd && (diag_cfg->flags & AM_DIAG_FLAG_ENABLED))
 
+/* 86400 seconds is 1 day */
+#define DIAG_DIR_LIFETIME 86400
+#define DIAG_DIR_EXPIRATION \
+    (apr_time_now() + apr_time_make(DIAG_DIR_LIFETIME, 0))
+
 /*------------------ Typedefs ------------------*/
 
 typedef struct iter_callback_data {
@@ -50,9 +55,6 @@ am_diag_httpd_error_level_str(request_rec *r, int level);
 static const char *
 am_diag_signature_method_str(request_rec *r,
                              LassoSignatureMethod signature_method);
-static apr_size_t
-am_diag_time_t_to_8601_buf(char *buf, apr_size_t buf_size, apr_time_t t);
-
 static int
 am_diag_open_log(server_rec *s, apr_pool_t *p);
 
@@ -263,21 +265,6 @@ am_diag_signature_method_str(request_rec *r,
     default:
         return apr_psprintf(r->pool, "unknown (%d)", signature_method);
     }
-}
-
-static apr_size_t
-am_diag_time_t_to_8601_buf(char *buf, apr_size_t buf_size, apr_time_t t)
-{
-    apr_size_t ret_size;
-    apr_time_exp_t tm;
-    const char fmt[] = "%FT%TZ";
-
-    apr_time_exp_gmt(&tm, t);
-    apr_strftime(buf, &ret_size, buf_size, fmt, &tm);
-
-    /* on errror assure string is null terminated */
-    if (ret_size == 0) buf[0] = 0;
-    return ret_size;
 }
 
 static int
@@ -721,13 +708,13 @@ am_diag_initialize_req(request_rec *r, am_diag_cfg_rec *diag_cfg,
 
 
     /* Only emit directory configuration once */
-    if (!apr_table_get(diag_cfg->dir_cfg_emitted, r->uri)) {
+    if (!am_cache_load_diag_dir(r, r->uri)) {
         dir_cfg = am_get_dir_cfg(r);
 
         am_diag_log_dir_cfg(r, level, dir_cfg,
                             "Mellon Directory Configuration for URL: %s",
                             r->uri);
-        apr_table_set(diag_cfg->dir_cfg_emitted, r->uri, "1");
+        am_cache_store_diag_dir(r, r->uri, "1", DIAG_DIR_EXPIRATION);
     }
     return true;
 }
@@ -783,18 +770,6 @@ am_diag_finalize_request(request_rec *r)
     apr_table_do(log_headers, &iter_data, r->subprocess_env, NULL);
 
     return OK;
-}
-
-char *
-am_diag_time_t_to_8601(request_rec *r, apr_time_t t)
-{
-    char *buf;
-
-    buf = apr_palloc(r->pool, ISO_8601_BUF_SIZE);
-    if (!buf) return NULL;
-
-    am_diag_time_t_to_8601_buf(buf, ISO_8601_BUF_SIZE, t);
-    return buf;
 }
 
 const char *
@@ -1102,7 +1077,7 @@ am_diag_log_profile(request_rec *r, int level, LassoProfile *profile,
 }
 
 void
-am_diag_log_cache_entry(request_rec *r, int level, am_cache_entry_t *entry,
+am_diag_log_session_state(request_rec *r, int level, am_session_state_t *ss,
                         const char *fmt, ...)
 {
     va_list ap;
@@ -1114,7 +1089,7 @@ am_diag_log_cache_entry(request_rec *r, int level, am_cache_entry_t *entry,
 
     if (!AM_DIAG_ENABLED(diag_cfg)) return;
     if (!am_diag_initialize_req(r, diag_cfg, req_cfg)) return;
-
+    
     va_start(ap, fmt);
     am_diag_format_line(r->pool, diag_cfg->fd, level, fmt, ap);
     va_end(ap);
@@ -1123,19 +1098,21 @@ am_diag_log_cache_entry(request_rec *r, int level, am_cache_entry_t *entry,
         name_id = am_cache_env_fetch_first(entry, "NAME_ID");
         assertion_id = am_cache_env_fetch_first(entry, "ASSERTION_ID");
 
+    if (ss) {
         apr_file_printf(diag_cfg->fd,
-                        "%skey: %s\n",
-                        indent(level+1), entry->key);
-        apr_file_printf(diag_cfg->fd,
-                        "%sname_id: %s\n",
-                        indent(level+1), name_id);
+                        "%ssession_id: %s\n",
+                        indent(level+1), ss->session_id);
+        am_diag_log_lasso_node(r, level+1, (LassoNode *)ss->lasso_name_id,
+                               "lasso_name_id:");
+        am_diag_log_lasso_node(r, level+1, (LassoNode *)ss->issuer,
+                               "issuer:");
         apr_file_printf(diag_cfg->fd,
                         "%sassertion_id: %s\n",
                         indent(level+1), assertion_id);
         apr_file_printf(diag_cfg->fd,
                         "%sexpires: %s\n",
                         indent(level+1),
-                        am_diag_time_t_to_8601(r, entry->expires));
+                        am_time_t_to_8601(r->pool, ss->expires));
         apr_file_printf(diag_cfg->fd,
                         "%sidle_timeout: %s\n",
                         indent(level+1),
@@ -1143,10 +1120,55 @@ am_diag_log_cache_entry(request_rec *r, int level, am_cache_entry_t *entry,
         apr_file_printf(diag_cfg->fd,
                         "%saccess: %s\n",
                         indent(level+1),
-                        am_diag_time_t_to_8601(r, entry->access));
+                        ss->logged_in);
         apr_file_printf(diag_cfg->fd,
-                        "%slogged_in: %s\n",
-                        indent(level+1), entry->logged_in ? "True" : "False");
+                        "%suser: %s\n",
+                        indent(level+1),
+                        ss->user);
+        apr_file_printf(diag_cfg->fd,
+                        "%scookie_token: %s\n",
+                        indent(level+1),
+                        ss->cookie_token);
+        apr_file_printf(diag_cfg->fd,
+                        "%senv_attrs: %u items\n",
+                        indent(level+1), apr_hash_count(ss->env_attrs));
+        {
+            apr_hash_index_t *hi;
+            char *name;
+            apr_ssize_t name_len;
+            apr_array_header_t *values;
+        
+            for (hi = apr_hash_first(apr_hash_pool_get(ss->env_attrs), ss->env_attrs);
+                 hi; hi = apr_hash_next(hi)) {
+                apr_hash_this(hi, (void*)&name, &name_len, (void*)&values);
+
+                if (values) {
+                    apr_file_printf(diag_cfg->fd,
+                                    "%s\"%s\": %d items = [%s]\n",
+                                    indent(level+2), name, values->nelts,
+                                    am_str_join(r->pool, values, ","));
+                } else {
+                    apr_file_printf(diag_cfg->fd,
+                                    "%s%s: <Empty>\n",
+                                    indent(level+2), name);
+                }
+            }
+        }
+
+        apr_file_printf(diag_cfg->fd,
+                        "%ssaml_response: %s\n",
+                        indent(level+1), ss->session_id);
+        write_indented_text(diag_cfg->fd, level+2, ss->saml_response);
+
+        apr_file_printf(diag_cfg->fd,
+                        "%slasso_identity_dump: %s\n",
+                        indent(level+1),
+                        ss->lasso_identity_dump);
+        apr_file_printf(diag_cfg->fd,
+                        "%slasso_session_dump: %s\n",
+                        indent(level+1),
+                        ss->lasso_session_dump);
+
     } else {
         apr_file_printf(diag_cfg->fd,
                         "%sentry is NULL\n",
@@ -1154,6 +1176,5 @@ am_diag_log_cache_entry(request_rec *r, int level, am_cache_entry_t *entry,
     }
     apr_file_flush(diag_cfg->fd);
 }
-
 
 #endif /* ENABLE_DIAGNOSTICS */
