@@ -390,34 +390,11 @@ typedef struct am_session_state_t {
     const char *session_id;
     LassoSaml2NameID *lasso_name_id;
     LassoSaml2NameID *issuer;
+    LassoSaml2Assertion *lasso_assertion;
     apr_hash_t *env_attrs;
     apr_time_t expires;
     apr_time_t idle_timeout;
     int logged_in;
-    unsigned short size;
-    am_cache_storage_t user;
-
-    /* Variables used to store lasso state between login requests
-     *and logout requests.
-     */
-    am_cache_storage_t lasso_identity;
-    am_cache_storage_t lasso_session;
-    am_cache_storage_t lasso_saml_response;
-
-    am_cache_env_t env[AM_CACHE_ENVSIZE];
-
-    apr_size_t pool_size;
-    apr_size_t pool_used;
-    char pool[];
-} am_cache_entry_t;
-
-typedef enum { 
-    AM_CACHE_SESSION, 
-    AM_CACHE_NAMEID,
-    AM_CACHE_ASSERTIONID
-} am_cache_key_t;
-
-typedef enum { 
     const char *user;
     const char *cookie_token;
     const char *lasso_identity_dump;
@@ -526,15 +503,6 @@ am_cache_store_session_entries(request_rec *r,
                                const char *session_xml);
 
 
-
-am_cache_entry_t *am_get_request_session(request_rec *r);
-am_cache_entry_t *am_get_request_session_by_nameid(request_rec *r, 
-                                                   char *nameid);
-am_cache_entry_t *am_get_request_session_by_assertionid(request_rec *r,
-                                                        char *assertionid);
-am_cache_entry_t *am_new_request_session(request_rec *r);
-void am_release_request_session(request_rec *r, am_cache_entry_t *session);
-void am_delete_request_session(request_rec *r, am_cache_entry_t *session);
 
 am_session_state_t *
 am_cache_load_session_by_session_id(request_rec *r, const char *session_id);
@@ -649,6 +617,8 @@ am_session_state_t *am_get_request_session(request_rec *r);
 am_session_state_t *am_session_get_session_by_name_id(request_rec *r,
                                                       LassoSaml2NameID *name_id,
                                                       LassoSaml2NameID *issuer);
+am_session_state_t *am_get_request_session_by_assertion_id(request_rec *r,
+                                                        LassoSaml2Assertion *assertion);
 am_session_state_t *am_new_request_session(request_rec *r);
 void am_release_request_session(request_rec *r, am_session_state_t **session_var);
 void am_session_delete(request_rec *r, am_session_state_t *session);
