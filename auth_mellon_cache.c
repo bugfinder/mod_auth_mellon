@@ -32,6 +32,7 @@ APLOG_USE_MODULE(auth_mellon);
 
 #define SESSION_KEY_PREFIX "session_id"
 #define NAMEID_KEY_PREFIX "name_id"
+#define ASSERTIONID_KEY_PREFIX "assertion_id"
 #define DIAG_DIR_KEY_PREFIX "diag_dir"
 
 /*--------------------------------- Prototypes -------------------------------*/
